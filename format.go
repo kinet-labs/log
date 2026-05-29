@@ -187,15 +187,9 @@ func appendUint64(dst []byte, n uint64, neg bool) []byte {
 	// Small numbers are fine as is
 	if n < 100000 {
 		if neg {
-			// Safe conversion - we know n < 100000
-			if n > 0 && n <= 100000 {
-				return strconv.AppendInt(dst, -int64(n), 10)
-			}
+			return strconv.AppendInt(dst, -int64(n), 10)
 		} else {
-			// Safe conversion - we know n < 100000
-			if n <= 100000 {
-				return strconv.AppendInt(dst, int64(n), 10)
-			}
+			return strconv.AppendInt(dst, int64(n), 10)
 		}
 	}
 	// Large numbers should be split

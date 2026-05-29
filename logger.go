@@ -8,30 +8,22 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-
-	"github.com/kinet-labs/log/level"
 )
 
-// Level constants aligned with zapcore.Level and level.Level for consistency
-// There is one and exactly one way to represent each level across all systems
+// Re-export slog levels for compatibility
 const (
-	// LevelVerbo is the most verbose level (below debug)
-	LevelVerbo slog.Level = -2
-	// LevelTrace maps to debug (zap doesn't have trace)
-	LevelTrace slog.Level = -1
-	// LevelDebug matches slog.LevelDebug and zapcore.DebugLevel
-	LevelDebug = slog.LevelDebug // -4 in slog, but we use -1 for zap compatibility
-	// LevelInfo matches slog.LevelInfo and zapcore.InfoLevel
-	LevelInfo = slog.LevelInfo // 0
-	// LevelWarn matches slog.LevelWarn and zapcore.WarnLevel
-	LevelWarn = slog.LevelWarn // 4
-	// LevelError matches slog.LevelError and zapcore.ErrorLevel
-	LevelError = slog.LevelError // 8
-	// LevelCrit is for critical errors
-	LevelCrit slog.Level = 12
-	// LevelFatal matches zapcore.FatalLevel
-	LevelFatal slog.Level = 5
+	LevelTrace slog.Level = -8
+	LevelDebug           = slog.LevelDebug
+	LevelInfo            = slog.LevelInfo
+	LevelWarn            = slog.LevelWarn
+	LevelError           = slog.LevelError
+	LevelCrit  slog.Level = 12
+	LevelFatal slog.Level = 16 // Added for Fatal
+	LevelVerbo slog.Level = -10 // Added for Verbo (most verbose)
 )
+
+// Level is the type for log levels
+type Level = slog.Level
 
 // Logger interface that supports both the geth-style interface and zap fields
 type Logger interface {
@@ -50,10 +42,10 @@ type Logger interface {
 	Handler() slog.Handler
 
 	// Additional methods for node compatibility
-	Fatal(msg string, fields ...Field)
-	Verbo(msg string, fields ...Field)
-	WithFields(fields ...Field) Logger
-	WithOptions(opts ...Option) Logger
+	Fatal(msg string, fields ...zap.Field)
+	Verbo(msg string, fields ...zap.Field)
+	WithFields(fields ...zap.Field) Logger
+	WithOptions(opts ...zap.Option) Logger
 	SetLevel(level slog.Level)
 	GetLevel() slog.Level
 	EnabledLevel(lvl slog.Level) bool
@@ -61,16 +53,16 @@ type Logger interface {
 	RecoverAndPanic(f func())
 	RecoverAndExit(f, exit func())
 	Stop()
-
+	
 	// io.Writer
 	io.Writer
 }
 
 // zapLogger wraps zap.Logger to implement our Logger interface
 type zapLogger struct {
-	logger  *zap.Logger
-	sugar   *zap.SugaredLogger
-	level   *zap.AtomicLevel
+	logger *zap.Logger
+	sugar  *zap.SugaredLogger
+	level  *zap.AtomicLevel
 	handler slog.Handler // For compatibility
 }
 
@@ -91,13 +83,34 @@ func WriterAt(logger Logger, level slog.Level) io.Writer {
 	return &LoggerWriter{logger: logger, level: level}
 }
 
+// NewLogger creates a new zap-backed logger
+func NewLogger(h slog.Handler) Logger {
+	// For compatibility, we accept an slog.Handler but create a zap logger
+	config := zap.NewProductionConfig()
+	config.DisableStacktrace = true
+	config.Encoding = "console"
+	config.EncoderConfig.TimeKey = "time"
+	config.EncoderConfig.LevelKey = "level"
+	config.EncoderConfig.MessageKey = "msg"
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	
+	logger, _ := config.Build()
+	return &zapLogger{
+		logger: logger,
+		sugar:  logger.Sugar(),
+		level:  &config.Level,
+		handler: h,
+	}
+}
+
 // NewZapLogger creates a logger directly from a zap logger
 func NewZapLogger(logger *zap.Logger) Logger {
 	level := zap.NewAtomicLevelAt(zapcore.InfoLevel)
 	return &zapLogger{
-		logger:  logger,
-		sugar:   logger.Sugar(),
-		level:   &level,
+		logger: logger,
+		sugar:  logger.Sugar(),
+		level:  &level,
 		handler: nil,
 	}
 }
@@ -107,14 +120,15 @@ func (l *zapLogger) Handler() slog.Handler {
 	return l.handler
 }
 
+
 // With adds context fields (variadic key-value pairs)
 func (l *zapLogger) With(ctx ...interface{}) Logger {
 	if len(ctx) == 0 {
 		return l
 	}
-
+	
 	// Convert ctx to zap fields
-	fields := make([]Field, 0, len(ctx)/2)
+	fields := make([]zap.Field, 0, len(ctx)/2)
 	for i := 0; i < len(ctx)-1; i += 2 {
 		key, ok := ctx[i].(string)
 		if !ok {
@@ -122,11 +136,11 @@ func (l *zapLogger) With(ctx ...interface{}) Logger {
 		}
 		fields = append(fields, zap.Any(key, ctx[i+1]))
 	}
-
+	
 	return &zapLogger{
-		logger:  l.logger.With(fields...),
-		sugar:   l.logger.With(fields...).Sugar(),
-		level:   l.level,
+		logger: l.logger.With(fields...),
+		sugar:  l.logger.With(fields...).Sugar(),
+		level:  l.level,
 		handler: l.handler,
 	}
 }
@@ -137,21 +151,21 @@ func (l *zapLogger) New(ctx ...interface{}) Logger {
 }
 
 // WithFields adds zap fields
-func (l *zapLogger) WithFields(fields ...Field) Logger {
+func (l *zapLogger) WithFields(fields ...zap.Field) Logger {
 	return &zapLogger{
-		logger:  l.logger.With(fields...),
-		sugar:   l.logger.With(fields...).Sugar(),
-		level:   l.level,
+		logger: l.logger.With(fields...),
+		sugar:  l.logger.With(fields...).Sugar(),
+		level:  l.level,
 		handler: l.handler,
 	}
 }
 
 // WithOptions applies zap options
-func (l *zapLogger) WithOptions(opts ...Option) Logger {
+func (l *zapLogger) WithOptions(opts ...zap.Option) Logger {
 	return &zapLogger{
-		logger:  l.logger.WithOptions(opts...),
-		sugar:   l.logger.WithOptions(opts...).Sugar(),
-		level:   l.level,
+		logger: l.logger.WithOptions(opts...),
+		sugar:  l.logger.WithOptions(opts...).Sugar(),
+		level:  l.level,
 		handler: l.handler,
 	}
 }
@@ -221,12 +235,12 @@ func (l *zapLogger) Crit(msg string, ctx ...interface{}) {
 }
 
 // Fatal logs at fatal level
-func (l *zapLogger) Fatal(msg string, fields ...Field) {
+func (l *zapLogger) Fatal(msg string, fields ...zap.Field) {
 	l.logger.Fatal(msg, fields...)
 }
 
 // Verbo logs at very verbose level
-func (l *zapLogger) Verbo(msg string, fields ...Field) {
+func (l *zapLogger) Verbo(msg string, fields ...zap.Field) {
 	// Map verbo to trace/debug with a special field
 	l.logger.Debug(msg, append(fields, zap.String("level", "verbo"))...)
 }
@@ -275,8 +289,8 @@ func (l *zapLogger) Write(p []byte) (n int, err error) {
 // Helper functions
 
 // contextToFields converts variadic key-value pairs to zap fields
-func contextToFields(ctx []interface{}) []Field {
-	fields := make([]Field, 0, len(ctx)/2)
+func contextToFields(ctx []interface{}) []zap.Field {
+	fields := make([]zap.Field, 0, len(ctx)/2)
 	for i := 0; i < len(ctx)-1; i += 2 {
 		key, ok := ctx[i].(string)
 		if !ok {
@@ -333,55 +347,38 @@ func NewNoOpLogger() Logger {
 	return NewZapLogger(zap.New(nopCore))
 }
 
-// NoLog is a no-op logger for testing
-type NoLog struct{}
+// Factory interface for creating loggers
+type Factory interface {
+	New(name string) Logger
+	NewWithFields(name string, fields ...zap.Field) Logger
+}
 
-// Implement all Logger interface methods as no-ops
-func (NoLog) With(ctx ...interface{}) Logger                       { return NoLog{} }
-func (NoLog) New(ctx ...interface{}) Logger                        { return NoLog{} }
-func (NoLog) Log(level slog.Level, msg string, ctx ...interface{}) {}
-func (NoLog) Trace(msg string, ctx ...interface{})                 {}
-func (NoLog) Debug(msg string, ctx ...interface{})                 {}
-func (NoLog) Info(msg string, ctx ...interface{})                  {}
-func (NoLog) Warn(msg string, ctx ...interface{})                  {}
-func (NoLog) Error(msg string, ctx ...interface{})                 {}
-func (NoLog) Crit(msg string, ctx ...interface{})                  {}
-func (NoLog) WriteLog(level slog.Level, msg string, attrs ...any)  {}
-func (NoLog) Enabled(ctx context.Context, level slog.Level) bool   { return false }
-func (NoLog) Handler() slog.Handler                                { return nil }
-func (NoLog) Fatal(msg string, fields ...Field)                    {}
-func (NoLog) Verbo(msg string, fields ...Field)                    {}
-func (NoLog) WithFields(fields ...Field) Logger                    { return NoLog{} }
-func (NoLog) WithOptions(opts ...Option) Logger                    { return NoLog{} }
-func (NoLog) SetLevel(level slog.Level)                            {}
-func (NoLog) GetLevel() slog.Level                                 { return LevelInfo }
-func (NoLog) EnabledLevel(lvl slog.Level) bool                     { return false }
-func (NoLog) StopOnPanic()                                         {}
-func (NoLog) RecoverAndPanic(f func())                             { f() }
-func (NoLog) RecoverAndExit(f, exit func())                        { f() }
-func (NoLog) Stop()                                                {}
-func (NoLog) Write(p []byte) (n int, err error)                    { return len(p), nil }
+// zapFactory implements Factory
+type zapFactory struct {
+	config zap.Config
+}
 
-// NewSimpleFactory creates a simple logger factory from zap config
-// This is a convenience function for simple use cases
-func NewSimpleFactory(config zap.Config) Factory {
-	return NewFactoryWithConfig(Config{
-		RotatingWriterConfig: RotatingWriterConfig{
-			Directory: "./logs",
-			MaxSize:   100,
-			MaxFiles:  10,
-			MaxAge:    30,
-			Compress:  true,
-		},
-		DisplayLevel: level.Info,
-		LogLevel:     level.Info,
-		LogFormat:    Plain,
-	})
+// NewFactory creates a new logger factory
+func NewFactory(config zap.Config) Factory {
+	return &zapFactory{config: config}
+}
+
+func (f *zapFactory) New(name string) Logger {
+	logger, _ := f.config.Build()
+	return NewZapLogger(logger.Named(name))
+}
+
+func (f *zapFactory) NewWithFields(name string, fields ...zap.Field) Logger {
+	logger, _ := f.config.Build()
+	return NewZapLogger(logger.Named(name).With(fields...))
 }
 
 // Factory and convenience functions
 
-// Note: New function moved to globals.go
+// New creates a new logger with the given context
+func New(ctx ...interface{}) Logger {
+	return Root().With(ctx...)
+}
 
 var (
 	root Logger
@@ -394,13 +391,8 @@ func init() {
 	config.Encoding = "console"
 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
-
-	logger, _ := config.Build(
-		zap.AddCaller(),
-		zap.WrapCore(func(c zapcore.Core) zapcore.Core {
-			return callerCore{Core: c}
-		}),
-	)
+	
+	logger, _ := config.Build()
 	root = NewZapLogger(logger)
 }
 
@@ -414,11 +406,17 @@ func SetDefault(l Logger) {
 	root = l
 }
 
+// Global convenience functions that use the root logger
+func Trace(msg string, ctx ...interface{}) { root.Trace(msg, ctx...) }
+func Debug(msg string, ctx ...interface{}) { root.Debug(msg, ctx...) }
+func Info(msg string, ctx ...interface{})  { root.Info(msg, ctx...) }
+func Warn(msg string, ctx ...interface{})  { root.Warn(msg, ctx...) }
+func Error(msg string, ctx ...interface{}) { root.Error(msg, ctx...) }
+func Crit(msg string, ctx ...interface{})  { root.Crit(msg, ctx...) }
+
 // Helper functions for formatting
 
-// levelMaxVerbosity must be low enough to include slog.LevelDebug (-4)
-// since some handlers like JSONHandler use slog's debug level
-const levelMaxVerbosity slog.Level = -10
+const levelMaxVerbosity = LevelVerbo
 
 // Legacy level constants for compatibility
 const (
@@ -481,24 +479,25 @@ func LevelString(l slog.Level) string {
 }
 
 // LevelAlignedString returns a 5-character aligned string for the level
-// Handles both slog native levels and our custom level values
 func LevelAlignedString(l slog.Level) string {
-	switch {
-	case l <= LevelVerbo: // -2 or lower
-		return "VERBO"
-	case l <= LevelTrace: // -1 (Trace and Debug both map here)
+	switch l {
+	case LevelTrace:
+		return "TRACE"
+	case LevelDebug:
 		return "DEBUG"
-	case l <= LevelInfo: // 0
+	case LevelInfo:
 		return "INFO "
-	case l <= LevelWarn, l == slog.LevelWarn: // 1 or 4 (slog.LevelWarn)
+	case LevelWarn:
 		return "WARN "
-	case l <= LevelError, l == slog.LevelError: // 2 or 8 (slog.LevelError)
+	case LevelError:
 		return "ERROR"
-	case l <= LevelFatal: // 5
-		return "FATAL"
-	case l <= LevelCrit: // 12
+	case LevelCrit:
 		return "CRIT "
+	case LevelFatal:
+		return "FATAL"
+	case LevelVerbo:
+		return "VERBO"
 	default:
-		return "OFF  "
+		return "UNKWN"
 	}
 }
