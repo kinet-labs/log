@@ -1,6 +1,6 @@
 module github.com/kinet-labs/log
 
-go 1.24.9
+go 1.26.3
 
 require (
 	github.com/mattn/go-colorable v0.1.14
@@ -8,4 +8,4 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
-require golang.org/x/sys v0.39.0 // indirect
+require golang.org/x/sys v0.42.0 // indirect
