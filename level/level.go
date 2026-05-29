@@ -19,7 +19,7 @@ const (
 	// Debug level (matches zapcore.DebugLevel = -1)
 	Debug Level = -1
 	// Trace level (same as debug since zap doesn't have trace)
-	Trace Level = -3
+	Trace Level = -1
 	// Info level (matches zapcore.InfoLevel = 0)
 	Info Level = 0
 	// Warn level (matches zapcore.WarnLevel = 1)

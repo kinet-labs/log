@@ -185,7 +185,7 @@ The package maintains backward compatibility:
    )
    ```
 
-3. **Use Appropriate Levels**:
+3. **Use Appropriate Levels**: 
    - `Debug` for detailed debugging info
    - `Info` for normal operations
    - `Warn` for recoverable issues
