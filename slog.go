@@ -1,4 +1,4 @@
-package logger
+package log
 
 import (
 	"bytes"
@@ -23,15 +23,34 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
-// slog.Level constants for geth compatibility
+// slog.Level constants for slog-based handlers
 const (
 	levelMaxVerbosity slog.Level = math.MinInt
-	LevelTrace        slog.Level = -8
-	LevelDebug                   = slog.LevelDebug
-	LevelInfo                    = slog.LevelInfo
-	LevelWarn                    = slog.LevelWarn
-	LevelError                   = slog.LevelError
-	LevelCrit         slog.Level = 12
+	slogLevelTrace    slog.Level = -8
+	slogLevelDebug               = slog.LevelDebug
+	slogLevelInfo                = slog.LevelInfo
+	slogLevelWarn                = slog.LevelWarn
+	slogLevelError               = slog.LevelError
+	slogLevelCrit     slog.Level = 12
+
+	// Exported slog.Level constants for use with Logger.Enabled()
+	SlogLevelTrace slog.Level = slogLevelTrace
+	SlogLevelDebug            = slogLevelDebug
+	SlogLevelInfo             = slogLevelInfo
+	SlogLevelWarn             = slogLevelWarn
+	SlogLevelError            = slogLevelError
+	SlogLevelCrit             = slogLevelCrit
+)
+
+// Level aliases for geth/logger compatibility.
+// These are logger.Level type (int8) for use with Logger.Enabled().
+const (
+	LevelTrace Level = TraceLevel
+	LevelDebug Level = DebugLevel
+	LevelInfo  Level = InfoLevel
+	LevelWarn  Level = WarnLevel
+	LevelError Level = ErrorLevel
+	LevelCrit  Level = FatalLevel
 
 	// Aliases for backward compatibility
 	LvlTrace = LevelTrace
@@ -68,8 +87,9 @@ type SlogLogger interface {
 	Warn(msg string, ctx ...interface{})
 	Error(msg string, ctx ...interface{})
 	Crit(msg string, ctx ...interface{})
-	Write(level slog.Level, msg string, attrs ...any)
+	Write(level slog.Level, msg string, attrs ...interface{})
 	Enabled(ctx context.Context, level slog.Level) bool
+	Handler() slog.Handler
 }
 
 type slogLogger struct {
@@ -105,7 +125,7 @@ func NewLoggerFromHandler(h slog.Handler) SlogLogger {
 	return &slogLogger{inner: slog.New(h)}
 }
 
-func (l *slogLogger) Write(level slog.Level, msg string, attrs ...any) {
+func (l *slogLogger) Write(level slog.Level, msg string, attrs ...interface{}) {
 	if !l.inner.Enabled(context.Background(), level) {
 		return
 	}
@@ -116,10 +136,10 @@ func (l *slogLogger) Write(level slog.Level, msg string, attrs ...any) {
 	}
 	r := slog.NewRecord(time.Now(), level, msg, pcs[0])
 	r.Add(attrs...)
-	l.inner.Handler().Handle(context.Background(), r)
+	_ = l.inner.Handler().Handle(context.Background(), r)
 }
 
-func (l *slogLogger) Log(level slog.Level, msg string, attrs ...any) {
+func (l *slogLogger) Log(level slog.Level, msg string, attrs ...interface{}) {
 	l.Write(level, msg, attrs...)
 }
 
@@ -136,7 +156,7 @@ func (l *slogLogger) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (l *slogLogger) Trace(msg string, ctx ...interface{}) {
-	l.Write(LevelTrace, msg, ctx...)
+	l.Write(slogLevelTrace, msg, ctx...)
 }
 
 func (l *slogLogger) Debug(msg string, ctx ...interface{}) {
@@ -156,15 +176,19 @@ func (l *slogLogger) Error(msg string, ctx ...interface{}) {
 }
 
 func (l *slogLogger) Crit(msg string, ctx ...interface{}) {
-	l.Write(LevelCrit, msg, ctx...)
+	l.Write(slogLevelCrit, msg, ctx...)
 	os.Exit(1)
+}
+
+func (l *slogLogger) Handler() slog.Handler {
+	return l.inner.Handler()
 }
 
 // FromLegacyLevel converts old geth verbosity level to slog.Level.
 func FromLegacyLevel(lvl int) slog.Level {
 	switch lvl {
 	case legacyLevelCrit:
-		return LevelCrit
+		return slogLevelCrit
 	case legacyLevelError:
 		return slog.LevelError
 	case legacyLevelWarn:
@@ -174,38 +198,38 @@ func FromLegacyLevel(lvl int) slog.Level {
 	case legacyLevelDebug:
 		return slog.LevelDebug
 	case legacyLevelTrace:
-		return LevelTrace
+		return slogLevelTrace
 	}
 	if lvl > legacyLevelTrace {
-		return LevelTrace
+		return slogLevelTrace
 	}
-	return LevelCrit
+	return slogLevelCrit
 }
 
 // LvlFromString returns the appropriate level from a string name.
 func LvlFromString(lvlString string) (slog.Level, error) {
 	switch strings.ToLower(lvlString) {
 	case "trace", "trce":
-		return LevelTrace, nil
+		return slogLevelTrace, nil
 	case "debug", "dbug":
-		return LevelDebug, nil
+		return slogLevelDebug, nil
 	case "info":
-		return LevelInfo, nil
+		return slogLevelInfo, nil
 	case "warn":
-		return LevelWarn, nil
+		return slogLevelWarn, nil
 	case "error", "eror":
-		return LevelError, nil
+		return slogLevelError, nil
 	case "crit":
-		return LevelCrit, nil
+		return slogLevelCrit, nil
 	default:
-		return LvlDebug, fmt.Errorf("unknown level: %v", lvlString)
+		return slogLevelDebug, fmt.Errorf("unknown level: %v", lvlString)
 	}
 }
 
 // LevelAlignedString returns a 5-character string containing the name of a level.
 func LevelAlignedString(l slog.Level) string {
 	switch l {
-	case LevelTrace:
+	case slogLevelTrace:
 		return "TRACE"
 	case slog.LevelDebug:
 		return "DEBUG"
@@ -215,7 +239,7 @@ func LevelAlignedString(l slog.Level) string {
 		return "WARN "
 	case slog.LevelError:
 		return "ERROR"
-	case LevelCrit:
+	case slogLevelCrit:
 		return "CRIT "
 	default:
 		return "unknown"
@@ -225,7 +249,7 @@ func LevelAlignedString(l slog.Level) string {
 // LevelString returns a string containing the name of a level.
 func LevelString(l slog.Level) string {
 	switch l {
-	case LevelTrace:
+	case slogLevelTrace:
 		return "trace"
 	case slog.LevelDebug:
 		return "debug"
@@ -235,7 +259,7 @@ func LevelString(l slog.Level) string {
 		return "warn"
 	case slog.LevelError:
 		return "error"
-	case LevelCrit:
+	case slogLevelCrit:
 		return "crit"
 	default:
 		return "unknown"
@@ -254,7 +278,7 @@ type GlogHandler struct {
 func NewGlogHandler(h slog.Handler) *GlogHandler {
 	return &GlogHandler{
 		origin:    h,
-		verbosity: LevelInfo,
+		verbosity: slogLevelInfo,
 		vmodule:   make(map[string]slog.Level),
 	}
 }
@@ -401,7 +425,7 @@ func (h *TerminalHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	buf := h.format(h.buf, r, h.useColor)
-	h.wr.Write(buf)
+	_, _ = h.wr.Write(buf)
 	h.buf = buf[:0]
 	return nil
 }
@@ -435,7 +459,7 @@ func (h *TerminalHandler) format(buf []byte, r slog.Record, usecolor bool) []byt
 	var color = ""
 	if usecolor {
 		switch r.Level {
-		case LevelCrit:
+		case slogLevelCrit:
 			color = "\x1b[35m"
 		case slog.LevelError:
 			color = "\x1b[31m"
@@ -445,7 +469,7 @@ func (h *TerminalHandler) format(buf []byte, r slog.Record, usecolor bool) []byt
 			color = "\x1b[32m"
 		case slog.LevelDebug:
 			color = "\x1b[36m"
-		case LevelTrace:
+		case slogLevelTrace:
 			color = "\x1b[34m"
 		}
 	}
