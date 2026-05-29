@@ -1,169 +1,307 @@
-package log
+package logger
 
 import (
-	"fmt"
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"sort"
 	"time"
-
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"unsafe"
 )
 
-// Re-export zap types for compatibility
-type (
-	// Field is an alias for zap.Field for structured logging
-	Field = zap.Field
-	// Option is an alias for zap.Option
-	Option = zap.Option
-	// ObjectMarshaler is an alias for zapcore.ObjectMarshaler
-	ObjectMarshaler = zapcore.ObjectMarshaler
-	// ArrayMarshaler is an alias for zapcore.ArrayMarshaler
-	ArrayMarshaler = zapcore.ArrayMarshaler
-)
-
-// Field constructors - re-export commonly used ones from zap
-var (
-	// String constructs a field with the given key and value.
-	String = zap.String
-	// Strings constructs a field that carries a slice of strings.
-	Strings = zap.Strings
-	// Int constructs a field with the given key and value.
-	Int = zap.Int
-	// Int64 constructs a field with the given key and value.
-	Int64 = zap.Int64
-	// Int32 constructs a field with the given key and value.
-	Int32 = zap.Int32
-	// Int16 constructs a field with the given key and value.
-	Int16 = zap.Int16
-	// Int8 constructs a field with the given key and value.
-	Int8 = zap.Int8
-	// Uint constructs a field with the given key and value.
-	Uint = zap.Uint
-	// Uint64 constructs a field with the given key and value.
-	Uint64 = zap.Uint64
-	// Uint32 constructs a field with the given key and value.
-	Uint32 = zap.Uint32
-	// Uint16 constructs a field with the given key and value.
-	Uint16 = zap.Uint16
-	// Uint8 constructs a field with the given key and value.
-	Uint8 = zap.Uint8
-	// Uintptr constructs a field with the given key and value.
-	Uintptr = zap.Uintptr
-	// Float64 constructs a field with the given key and value.
-	Float64 = zap.Float64
-	// Float32 constructs a field with the given key and value.
-	Float32 = zap.Float32
-	// Bool constructs a field that carries a bool.
-	Bool = zap.Bool
-	// Any takes a key and an arbitrary value and chooses the best way to represent
-	// them as a field, falling back to a reflection-based approach only if necessary.
-	Any = zap.Any
-	// Err is shorthand for the common idiom NamedError("error", err).
-	Err = zap.Error
-	// NamedError constructs a field that lazily stores err.Error() under the
-	// provided key. Errors which also implement fmt.Formatter (like those produced
-	// by github.com/pkg/errors) will also have their verbose representation stored
-	// under key+"Verbose". If passed a nil error, the field is a no-op.
-	NamedError = zap.NamedError
-	// Skip constructs a no-op field, which is often useful when handling invalid
-	// inputs in other Field constructors.
-	Skip = zap.Skip
-	// Binary constructs a field that carries an opaque binary blob.
-	Binary = zap.Binary
-	// ByteString constructs a field that carries UTF-8 encoded text as a []byte.
-	// To log opaque binary blobs (which aren't necessarily valid UTF-8), use
-	// Binary.
-	ByteString = zap.ByteString
-	// Complex128 constructs a field that carries a complex number. Unlike most
-	// numeric fields, this costs an allocation (to convert the complex128 to
-	// interface{}).
-	Complex128 = zap.Complex128
-	// Complex64 constructs a field that carries a complex number. Unlike most
-	// numeric fields, this costs an allocation (to convert the complex64 to
-	// interface{}).
-	Complex64 = zap.Complex64
-	// Duration constructs a field with the given key and value. The encoder
-	// controls how the duration is serialized.
-	Duration = zap.Duration
-	// Time constructs a field with the given key and value. The encoder
-	// controls how the time is serialized.
-	Time = zap.Time
-	// Stack constructs a field that stores a stacktrace of the current goroutine
-	// under provided key. Keep in mind that taking a stacktrace is eager and
-	// expensive (relatively speaking); this function both makes an allocation and
-	// takes about two microseconds.
-	Stack = zap.Stack
-	// StackSkip constructs a field similarly to Stack, but also skips the given
-	// number of frames from the top of the stacktrace.
-	StackSkip = zap.StackSkip
-)
-
-// Stringer constructs a field with the given key and the output of the value's
-// String method. The Stringer's String method is called lazily.
-func Stringer(key string, val fmt.Stringer) Field {
-	return zap.Stringer(key, val)
+func isNilValue(i interface{}) bool {
+	return (*[2]uintptr)(unsafe.Pointer(&i))[1] == 0
 }
 
-// Reflect constructs a field with the given key and an arbitrary object. It uses
-// an encoding-appropriate, reflection-based function to lazily serialize nearly
-// any object into the logging context, but it's relatively slow and allocation-heavy.
-// Outside tests, Any is always a better choice.
-//
-// If encoding fails (e.g., trying to serialize a map[int]string to JSON), Reflect
-// includes the error message in the final log output.
-func Reflect(key string, val interface{}) Field {
-	return zap.Reflect(key, val)
+func appendFields(dst []byte, fields interface{}, stack bool, ctx context.Context, hooks []Hook) []byte {
+	switch fields := fields.(type) {
+	case []interface{}:
+		if n := len(fields); n&0x1 == 1 { // odd number
+			fields = fields[:n-1]
+		}
+		dst = appendFieldList(dst, fields, stack, ctx, hooks)
+	case map[string]interface{}:
+		keys := make([]string, 0, len(fields))
+		for key := range fields {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		kv := make([]interface{}, 2)
+		for _, key := range keys {
+			kv[0], kv[1] = key, fields[key]
+			dst = appendFieldList(dst, kv, stack, ctx, hooks)
+		}
+	}
+	return dst
 }
 
-// Namespace creates a named, isolated scope within the logger's context. All
-// subsequent fields will be added to the new namespace.
-//
-// This helps prevent key collisions when injecting loggers into sub-components
-// or third-party libraries.
-func Namespace(key string) Field {
-	return zap.Namespace(key)
+func appendObject(dst []byte, obj LogObjectMarshaler, stack bool, ctx context.Context, hooks []Hook) []byte {
+	e := newEvent(LevelWriterAdapter{io.Discard}, DebugLevel, stack, ctx, hooks)
+	e.buf = e.buf[:0] // discard the beginning marker added by newEvent
+	e.appendObject(obj)
+	dst = append(dst, e.buf...)
+	putEvent(e)
+	return dst
 }
 
-// Inline constructs a Field that is similar to Object, but it
-// will add the elements of the provided ObjectMarshaler to the
-// current namespace.
-func Inline(val ObjectMarshaler) Field {
-	return zap.Inline(val)
-}
+func appendFieldList(dst []byte, kvList []interface{}, stack bool, ctx context.Context, hooks []Hook) []byte {
+	for i, n := 0, len(kvList); i < n; i += 2 {
+		key, val := kvList[i], kvList[i+1]
+		if key, ok := key.(string); ok {
+			dst = enc.AppendKey(dst, key)
+		} else {
+			continue
+		}
+		switch val := val.(type) {
+		case string:
+			dst = enc.AppendString(dst, val)
+		case []byte:
+			dst = enc.AppendBytes(dst, val)
+		case error:
+			switch m := ErrorMarshalFunc(val).(type) {
+			case nil:
+				dst = enc.AppendNil(dst)
+			case LogObjectMarshaler:
+				dst = appendObject(dst, m, stack, ctx, hooks)
+			case error:
+				if !isNilValue(m) {
+					dst = enc.AppendString(dst, m.Error())
+				}
+			case string:
+				dst = enc.AppendString(dst, m)
+			default:
+				dst = enc.AppendInterface(dst, m)
+			}
 
-// Object constructs a field with the given key and ObjectMarshaler. It
-// provides a flexible, but still type-safe and efficient, way to add map- or
-// struct-like user-defined types to the logging context. The struct's
-// MarshalLogObject method is called lazily.
-func Object(key string, val ObjectMarshaler) Field {
-	return zap.Object(key, val)
-}
+			if stack && ErrorStackMarshaler != nil {
+				switch m := ErrorStackMarshaler(val).(type) {
+				case nil:
+					// do nothing
+				case LogObjectMarshaler:
+					dst = enc.AppendKey(dst, ErrorStackFieldName)
+					dst = appendObject(dst, m, stack, ctx, hooks)
+				case error:
+					dst = enc.AppendKey(dst, ErrorStackFieldName)
+					dst = enc.AppendString(dst, m.Error())
+				case string:
+					dst = enc.AppendKey(dst, ErrorStackFieldName)
+					dst = enc.AppendString(dst, m)
+				default:
+					dst = enc.AppendKey(dst, ErrorStackFieldName)
+					dst = enc.AppendInterface(dst, m)
+				}
+			}
+		case []error:
+			dst = enc.AppendArrayStart(dst)
+			for i, err := range val {
+				switch m := ErrorMarshalFunc(err).(type) {
+				case nil:
+					dst = enc.AppendNil(dst)
+				case LogObjectMarshaler:
+					dst = appendObject(dst, m, stack, ctx, hooks)
+				case error:
+					if !isNilValue(m) {
+						dst = enc.AppendString(dst, m.Error())
+					}
+				case string:
+					dst = enc.AppendString(dst, m)
+				default:
+					dst = enc.AppendInterface(dst, m)
+				}
 
-// Array constructs a field with the given key and ArrayMarshaler. It provides
-// a flexible, but still type-safe and efficient, way to add array-like types
-// to the logging context. The struct's MarshalLogArray method is called
-// lazily.
-func Array(key string, val ArrayMarshaler) Field {
-	return zap.Array(key, val)
-}
-
-// Timep constructs a field that carries a *time.Time. The returned Field will safely
-// and explicitly represent `nil` when appropriate.
-func Timep(key string, val *time.Time) Field {
-	return zap.Timep(key, val)
-}
-
-// Durationp constructs a field that carries a *time.Duration. The returned Field will safely
-// and explicitly represent `nil` when appropriate.
-func Durationp(key string, val *time.Duration) Field {
-	return zap.Durationp(key, val)
-}
-
-// UserString creates a field for user-provided strings that may need sanitization
-func UserString(key, val string) Field {
-	return zap.String(key, val)
-}
-
-// UserStrings creates a field for user-provided string slices that may need sanitization
-func UserStrings(key string, vals []string) Field {
-	return zap.Strings(key, vals)
+				if i < (len(val) - 1) {
+					dst = enc.AppendArrayDelim(dst)
+				}
+			}
+			dst = enc.AppendArrayEnd(dst)
+		case []LogObjectMarshaler:
+			dst = enc.AppendArrayStart(dst)
+			for i, obj := range val {
+				dst = appendObject(dst, obj, stack, ctx, hooks)
+				if i < (len(val) - 1) {
+					dst = enc.AppendArrayDelim(dst)
+				}
+			}
+			dst = enc.AppendArrayEnd(dst)
+		case bool:
+			dst = enc.AppendBool(dst, val)
+		case int:
+			dst = enc.AppendInt(dst, val)
+		case int8:
+			dst = enc.AppendInt8(dst, val)
+		case int16:
+			dst = enc.AppendInt16(dst, val)
+		case int32:
+			dst = enc.AppendInt32(dst, val)
+		case int64:
+			dst = enc.AppendInt64(dst, val)
+		case uint:
+			dst = enc.AppendUint(dst, val)
+		case uint8:
+			dst = enc.AppendUint8(dst, val)
+		case uint16:
+			dst = enc.AppendUint16(dst, val)
+		case uint32:
+			dst = enc.AppendUint32(dst, val)
+		case uint64:
+			dst = enc.AppendUint64(dst, val)
+		case float32:
+			dst = enc.AppendFloat32(dst, val, FloatingPointPrecision)
+		case float64:
+			dst = enc.AppendFloat64(dst, val, FloatingPointPrecision)
+		case time.Time:
+			dst = enc.AppendTime(dst, val, TimeFieldFormat)
+		case time.Duration:
+			dst = enc.AppendDuration(dst, val, DurationFieldUnit, DurationFieldFormat, DurationFieldInteger, FloatingPointPrecision)
+		case *string:
+			if val != nil {
+				dst = enc.AppendString(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *bool:
+			if val != nil {
+				dst = enc.AppendBool(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *int:
+			if val != nil {
+				dst = enc.AppendInt(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *int8:
+			if val != nil {
+				dst = enc.AppendInt8(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *int16:
+			if val != nil {
+				dst = enc.AppendInt16(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *int32:
+			if val != nil {
+				dst = enc.AppendInt32(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *int64:
+			if val != nil {
+				dst = enc.AppendInt64(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *uint:
+			if val != nil {
+				dst = enc.AppendUint(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *uint8:
+			if val != nil {
+				dst = enc.AppendUint8(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *uint16:
+			if val != nil {
+				dst = enc.AppendUint16(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *uint32:
+			if val != nil {
+				dst = enc.AppendUint32(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *uint64:
+			if val != nil {
+				dst = enc.AppendUint64(dst, *val)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *float32:
+			if val != nil {
+				dst = enc.AppendFloat32(dst, *val, FloatingPointPrecision)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *float64:
+			if val != nil {
+				dst = enc.AppendFloat64(dst, *val, FloatingPointPrecision)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *time.Time:
+			if val != nil {
+				dst = enc.AppendTime(dst, *val, TimeFieldFormat)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case *time.Duration:
+			if val != nil {
+				dst = enc.AppendDuration(dst, *val, DurationFieldUnit, DurationFieldFormat, DurationFieldInteger, FloatingPointPrecision)
+			} else {
+				dst = enc.AppendNil(dst)
+			}
+		case []string:
+			dst = enc.AppendStrings(dst, val)
+		case []bool:
+			dst = enc.AppendBools(dst, val)
+		case []int:
+			dst = enc.AppendInts(dst, val)
+		case []int8:
+			dst = enc.AppendInts8(dst, val)
+		case []int16:
+			dst = enc.AppendInts16(dst, val)
+		case []int32:
+			dst = enc.AppendInts32(dst, val)
+		case []int64:
+			dst = enc.AppendInts64(dst, val)
+		case []uint:
+			dst = enc.AppendUints(dst, val)
+		// case []uint8: is handled as []byte above
+		case []uint16:
+			dst = enc.AppendUints16(dst, val)
+		case []uint32:
+			dst = enc.AppendUints32(dst, val)
+		case []uint64:
+			dst = enc.AppendUints64(dst, val)
+		case []float32:
+			dst = enc.AppendFloats32(dst, val, FloatingPointPrecision)
+		case []float64:
+			dst = enc.AppendFloats64(dst, val, FloatingPointPrecision)
+		case []time.Time:
+			dst = enc.AppendTimes(dst, val, TimeFieldFormat)
+		case []time.Duration:
+			dst = enc.AppendDurations(dst, val, DurationFieldUnit, DurationFieldFormat, DurationFieldInteger, FloatingPointPrecision)
+		case nil:
+			dst = enc.AppendNil(dst)
+		case net.IP:
+			dst = enc.AppendIPAddr(dst, val)
+		case []net.IP:
+			dst = enc.AppendIPAddrs(dst, val)
+		case net.IPNet:
+			dst = enc.AppendIPPrefix(dst, val)
+		case []net.IPNet:
+			dst = enc.AppendIPPrefixes(dst, val)
+		case net.HardwareAddr:
+			dst = enc.AppendMACAddr(dst, val)
+		case json.RawMessage:
+			dst = appendJSON(dst, val)
+		default:
+			if lom, ok := val.(LogObjectMarshaler); ok {
+				dst = appendObject(dst, lom, stack, ctx, hooks)
+			} else {
+				dst = enc.AppendInterface(dst, val)
+			}
+		}
+	}
+	return dst
 }
