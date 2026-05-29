@@ -1,4 +1,4 @@
-// Package log provides a global logger for zerolog-style logging.
+// Package log provides a global logger for chaining-style logging.
 // Import this package for convenient access to the global logger.
 //
 //	import "github.com/kinet-labs/logger/log"
