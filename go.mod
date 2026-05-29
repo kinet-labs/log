@@ -2,8 +2,6 @@ module github.com/kinet-labs/log
 
 go 1.25
 
-toolchain go1.24.6
-
 require (
 	github.com/holiman/uint256 v1.3.2
 	go.uber.org/zap v1.27.0
